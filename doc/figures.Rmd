@@ -1,0 +1,1131 @@
+---
+title: "SWFSC-IMIPAS figures"
+author: "Kevin L. Stierhoff"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r load-libraries-functions, error=FALSE, message=FALSE, warning=FALSE, echo=FALSE}
+# Install and load pacman (library management package)
+if (!require("pacman")) install.packages("pacman")
+
+# Install and load required packages from CRAN ---------------------------------
+pacman::p_load(tidyverse,ggOceanMaps,ggspatial,marmap,lubridate,
+               here,sf,stars,shadowtext,patchwork,rnaturalearth,
+               concaveman,scatterpie)
+
+# remotes::install_github("MikkoVihtakari/ggOceanMaps")
+
+# Install and load required packages from Github -------------------------------
+# surveyR
+pacman::p_load_gh("kstierhoff/atm")
+# rnaturalearth data
+pacman::p_load_gh("ropenscilabs/rnaturalearthdata")
+pacman::p_load_gh("ropenscilabs/rnaturalearthhires")
+
+# Preferences/settings
+theme_set(theme_bw())
+
+# Define projections
+crs.proj <- 3310
+crs.geog <- 4326
+
+# Define species to be analysed
+cps.spp            <- c("Clupea pallasii","Engraulis mordax","Sardinops sagax",
+                        "Scomber japonicus","Trachurus symmetricus","Etrumeus acuminatus")
+# List ships
+cruise.ships <- c("RL","SH","JCF")
+cruise.ships.rm <- c("MF", "FR")
+min.year <- 2006
+
+# Load bathymetry?
+get.bathy <- FALSE
+
+# Map landmarks
+label.list <- c("San Francisco","Cape Flattery","Newport",
+                "Point Conception","Cape Mendocino","Columbia River",
+                "Cape Scott","San Diego",
+                "Ensenada","Punta Eugenia","El Rosario",
+                "Punta Abreojos","San Carlos","Cabo San Lucas")
+
+locations <- filter(read_csv(here("data/locations.csv")), 
+                    name %in% label.list) %>% project_df(to = crs.proj)
+
+# Set species colors
+sardine.color      <- '#FF0000'
+anchovy.color      <- '#00CD66'
+jack.mack.color    <- '#0000FF'
+jacksmelt.color    <- '#A020F0'
+pac.mack.color     <- '#00FFFF'
+pac.herring.color  <- '#F5DEB3'
+rnd.herring.color  <- '#F0B81D'
+```
+
+```{r functions}
+# Rotate an sf geom around a center point. If no center is
+# specified then it rotates around the center of the geom.
+# This is technically an affine transformation: https://r-spatial.github.io/sf/articles/sf3.html#affine-transformations-1
+st_ellide_rotate = function(x, degrees, center_coords=NULL){
+  if(degrees < -360 | degrees > 360) stop('Degrees must be in the range -360 to 360')
+  x = sf::st_combine(x)
+  if(is.null(center_coords)){
+    center_coords = sf::st_centroid(x)
+  }
+  radians = degrees * pi/180
+  transform_matrix = matrix(c(cos(radians), sin(radians), -sin(radians), cos(radians)), 2, 2)
+  
+  return((x-center_coords) * transform_matrix + center_coords)
+}
+```
+
+```{r process-trawl-haul-data}
+# Load trawl data from SQL server database (through summer 2023)
+load(here("data/trawl_data.Rdata"))
+
+# Format haul data
+haul.all <- haul.all %>% 
+  arrange(haul) %>% 
+  mutate(
+    netInWaterTime  = ymd_hms(netInWaterTime),
+    equilibriumTime = ymd_hms(equilibriumTime),
+    haulBackTime    = ymd_hms(haulBackTime),
+    netOnDeckTime   = ymd_hms(netOnDeckTime))
+
+# Classify hauls by season (spring or summer)
+haul <- haul.all %>% 
+  mutate(season = case_when(
+    month(equilibriumTime) < 6 ~ "Spring",
+    TRUE ~ "Summer")) %>% 
+  mutate(year = year(equilibriumTime))  %>% 
+  mutate(key = paste(cruise, ship, haul)) %>% 
+  # filter(season == "summer") %>%
+  # Assign cluster based on yearday
+  mutate(sample.type = "Trawl",
+         year >= min.year) %>% 
+  filter(!is.na(startLatDecimal), !is.na(startLatDecimal),
+         !is.na(startLongDecimal), !is.na(stopLongDecimal),
+         !is.na(year)) %>% 
+  mutate(survey = "US") %>% 
+  filter(!ship %in% cruise.ships.rm)
+
+# Find midpoint of each haul as the mean lat/lon
+haul.mid <- haul %>% 
+  group_by(key, cruise, ship, haul, sample.type, season, survey) %>% 
+  summarise(
+    lat  = mean(c(startLatDecimal, stopLatDecimal)),
+    long = mean(c(startLongDecimal, stopLongDecimal))) %>% 
+  filter(lat > 0, long < -100)
+
+# Convert to sf for plotting
+haul.mid.sf <- haul.mid %>% 
+  st_as_sf(coords = c("long","lat"), crs = crs.geog) 
+
+trawl.bounds <- haul.mid.sf %>% 
+  st_transform(crs = crs.proj) %>% 
+  st_bbox() 
+
+# Save haul data
+saveRDS(haul, file = here("output/haul_info.rds"))
+
+# Load Carranza data
+haul.jcf <- read_csv(here("data/positio_negativo_pelmen_lon_lat.csv")) %>% 
+  mutate(date = dmy(date)) %>%
+  mutate(season = case_when(
+    month(date) < 6 ~ "Spring",
+    TRUE ~ "Summer")) %>% 
+  mutate(survey = "MX",
+         ship = "JCF",
+         key = paste(cruise, haul)) %>% 
+  filter(!is.na(long), !is.na(lat)) %>%
+  project_df(to = crs.proj) 
+
+# # Get Gulf of CA data
+# haul.jcf.gc <- read_csv(here("data/catch_specie_2019_2023_GC.csv")) %>% 
+#   mutate(survey = "MX",
+#          ship = "JCF",
+#          key = paste(cruise, haul)) %>% 
+#   mutate(date = dmy(date)) %>% 
+#   mutate(season = case_when(
+#     month(date) < 6 ~ "Spring",
+#     TRUE ~ "Summer")) %>% 
+#   project_df(to = crs.proj) %>% 
+#   rename(scientificName = species) %>% 
+#   mutate(region = "GOC")
+# 
+# # Combine Baja and Gulf of CA hauls
+# haul.jcf <- bind_rows(haul.jcf, haul.jcf.gc)
+# haul.neg.jcf <- haul.jcf %>% 
+#   filter(peso_captura_total_kg==0)
+
+# ggplot(haul.neg.jcf, aes(long, lat, colour = season)) + geom_point() + coord_map()
+```  
+
+```{r process-trawl-catch-data}
+# Compute totalWeight and totalNum
+catch <- catch.all %>% 
+  mutate(
+    totalWeight = subSampleWtkg + remainingSubSampleWtkg,
+    totalNum    = (subSampleCount/subSampleWtkg)*totalWeight) %>% 
+  mutate(key = paste(cruise, ship, haul)) %>% 
+  left_join(select(spp.codes, species, scientificName, commonName)) %>% 
+  semi_join(select(haul.mid, key)) %>%
+  left_join(select(haul.mid, key, lat, long, season)) %>% 
+  filter(scientificName %in% cps.spp) %>% 
+  project_df(to = crs.proj) %>% 
+  mutate(survey = "US") %>% 
+  filter(!is.na(totalWeight),!is.na(totalNum)) 
+
+# Create JCF catch data frame
+# Received from Roberto on 3/4/2024; contains positive tows for Baja and the Gulf of CA
+catch.jcf <- read_csv(here("data/datos_cps_noroeste.csv")) %>% 
+  filter(species %in% cps.spp) %>% 
+  mutate(survey = "MX",
+         ship = "JCF",
+         key = paste(cruise, haul),
+         scientificName = species) %>% 
+  # filter(period == "nocturno") %>% 
+  mutate(date = mdy(date),
+         season = case_when(
+           month(date) < 6 ~ "Spring",
+           TRUE ~ "Summer"))
+
+# ggplot() +
+#   geom_point(data = haul.jcf, aes(long, lat), colour = "gray50") +
+#   geom_point(data = catch.jcf, aes(long, lat, fill = species), shape = 21) +
+#   facet_grid(season~species) +
+#   coord_map()
+
+# catch.jcf <- read_csv(here("data/datos_cps_copbc.csv")) %>%
+#   mutate(date = ymd(date))
+#   select(cruise, haul, scientificName = species, totalCatchWtkg) %>% 
+#   mutate(survey = "MX",
+#          ship = "JCF",
+#          key = paste(cruise, haul)) %>% 
+#   left_join(select(haul.jcf, key, date, long, lat, X, Y, season))
+# 
+# ggplot() +
+#   geom_point(data = haul.jcf, aes(long, lat), shape = 21) +
+#   geom_point(data = catch.jcf, aes(long, lat, fill = scientificName), shape = 21) +
+#   facet_grid(season~scientificName) +
+#   coord_map()
+```
+
+```{r process-specimens}
+lengths.sub <- lengths.all %>% 
+  mutate(key = paste(cruise, ship, haul)) %>% 
+  semi_join(select(catch, key)) %>%
+  left_join(select(haul, key, season, 
+                   lat = startLatDecimal, long = startLongDecimal, year)) %>% 
+  left_join(select(spp.codes, species, scientificName))  %>% 
+  mutate(lat.bin  = cut(lat, c(0, 34.3, 40.80, 60)),
+         lat.bin2 = cut(lat, seq(20, 60, 5)))
+
+lengths.sar <- lengths.sub %>% 
+  filter(scientificName == "Sardinops sagax")
+
+# ggplot(lengths.sar, aes(standardLength_mm)) +
+#   geom_histogram() + 
+#   facet_wrap(~season, ncol = 1)
+# 
+# ggplot(lengths.sar, aes(standardLength_mm)) +
+#   geom_histogram() + 
+#   facet_grid(lat.bin~season)
+# 
+# ggplot(lengths.sar, aes(standardLength_mm, fill = season)) +
+#   geom_histogram() + 
+#   facet_grid(season~lat.bin2)
+# 
+# ggplot(lengths.sar, aes(standardLength_mm, fill = season)) +
+#   geom_histogram(alpha = 0.4) + 
+#   facet_wrap(~lat.bin2, ncol = 1) +
+#   theme_bw()
+
+# Plot spring sardine lengths by season and vessel
+sar.spring.lat <- ggplot(filter(lengths.sar, season == "Spring"),
+                         aes(standardLength_mm, fill = ship)) + 
+  geom_histogram() + 
+  facet_grid(lat.bin~year)
+
+ggsave(sar.spring.lat, file = here("figs/sar_lengths_spring_by_lat.png"),
+       width = 12, height = 6)
+```
+
+```{r load-shapefiles}
+# Load SWFSC 
+tx.us <- read_csv(here("data/waypoints_2307RL.csv")) %>% 
+  st_as_sf(coords = c("Longitude","Latitude"), crs = crs.geog) %>% 
+  group_by(Type, Transect, Region) %>% 
+  summarise(do_union = FALSE) %>% 
+  st_cast("LINESTRING") %>% 
+  ungroup() %>% 
+  st_transform(crs = crs.proj) %>% 
+  filter(!Type %in% c("Saildrone","Carranza")) 
+# mapview::mapview(tx.us, zcol = "Type")  
+
+# Load Carranza transects
+## Baja CA 
+tx.bc <- st_read(here("data/carranza_transects/Planned_Transects_BC_2023.shp")) %>% 
+  st_transform(crs = crs.proj) %>% 
+  mutate(Type = case_when(
+    Type == "Adaptative" ~ "Adaptive",
+    TRUE ~ Type))
+# mapview::mapview(tx.bc, zcol = "Type")
+
+## Gulf of CA
+tx.gc <- st_read(here("data/carranza_transects/Planned_Transects_GC_2023.shp")) %>% 
+  st_transform(crs = crs.proj) %>% 
+  mutate(Type = case_when(
+    Type == "Adaptative" ~ "Adaptive",
+    TRUE ~ Type))
+# mapview::mapview(tx.gc, zcol = "Type")
+
+# Combine shapefiles for setting map boundaries
+tx.all <- select(tx.bc, Type) %>% 
+  bind_rows(select(tx.gc, Type)) %>% 
+  bind_rows(select(tx.us, Type))
+# mapview::mapview(tx.all, zcol = "Type")
+
+# Convert to points for setting map extent
+tx.points <- st_cast(tx.all, "POINT") %>% 
+  st_transform(crs = crs.geog)
+
+# Load bathymetry contours
+bathy.contours <- st_read(here("data/gis/bathy_contours.shp")) %>% 
+  st_transform(crs.geog) %>% 
+  rename(Depth = Contour)
+```
+
+```{r get-bathy}
+# Get bathymetry data across range of nav data (plus/minus one degree lat/long)
+if (get.bathy) {
+  # Get boundaries for bathymetry grid
+  # From NOAA vessel
+  bathy.bounds <- tx.points %>% 
+    # bind_rows(haul.mid.sf) %>% 
+    select(geometry)
+  
+  map.bounds <- bathy.bounds %>% 
+    # st_transform(crs.proj) %>%
+    st_bbox()
+  
+  # Create bounding box
+  bathy.bounds <- st_bbox(bathy.bounds) 
+  
+  # Download bathy grid
+  noaa.bathy <- getNOAA.bathy(
+    lon1 = bathy.bounds$xmin - 1, 
+    lon2 = bathy.bounds$xmax + 1,
+    lat1 = bathy.bounds$ymax + 1, 
+    lat2 = bathy.bounds$ymin - 1, 
+    resolution = 1)
+  
+  # Save bathy results
+  save(noaa.bathy, bathy.bounds, map.bounds, 
+       file = paste(here("data/bathy.Rdata")))
+  
+} else {
+  load(here("data/bathy.Rdata"))
+}
+```
+
+```{r create-basemap}
+# https://mikkovihtakari.github.io/ggOceanMaps/index.html
+bathy <- raster_bathymetry(stars::st_as_stars(marmap::as.raster(noaa.bathy)), 
+                           depths = NULL, verbose = FALSE)
+
+# base.map.bathy <- basemap(c(bathy.bounds$xmin, bathy.bounds$xmax, 
+#                             bathy.bounds$ymin, bathy.bounds$ymax), 
+#                           bathymetry = TRUE,
+#                           bathy.style = "rcg",
+#                           crs = crs.proj,
+#                           legends = FALSE) + 
+#   # Plot bathy contours
+#   geom_sf(data = bathy.contours, colour = "gray50", alpha = 0.5) +
+#   labs(x = "Longitude",
+#        y = "Latitude")
+
+base.map <- basemap(c(bathy.bounds$xmin, bathy.bounds$xmax, 
+                      bathy.bounds$ymin, bathy.bounds$ymax), 
+                    bathymetry = FALSE,
+                    crs = crs.geog,
+                    land.col = "gray90",
+                    legends = FALSE) + 
+  # Plot bathy contours
+  geom_sf(data = bathy.contours, colour = "gray50", alpha = 0.5) +
+  labs(x = "Longitude",
+       y = "Latitude")
+
+base.map.proj <- basemap(c(bathy.bounds$xmin, bathy.bounds$xmax, 
+                           bathy.bounds$ymin, bathy.bounds$ymax), 
+                         bathymetry = FALSE,
+                         crs = crs.proj,
+                         land.col = "gray90",
+                         legends = FALSE) + 
+  # Plot bathy contours
+  geom_sf(data = bathy.contours, colour = "gray50", alpha = 0.5) +
+  labs(x = "Longitude",
+       y = "Latitude")
+```
+
+```{r load-rotated-basemap}
+# base.map.rotated <- readRDS(here::here("data/base_map_rotated.rds"))
+```
+
+
+```{r create-rotated-basemap, eval=FALSE}
+# # From https://stackoverflow.com/questions/31873151/how-rotate-map-in-r
+# 
+# # Download country boundaries
+# # countries = rnaturalearth::ne_countries(scale = 10,returnclass = 'sf') %>%
+# #   filter(name %in% c("United States of America"))
+# countries = rnaturalearth::ne_countries(scale = 10,returnclass = 'sf') %>%
+#   filter(name %in% c("United States of America", "Mexico", "Canada"))
+# 
+# states <- rnaturalearth::ne_states(country = 'United States of America', returnclass = 'sf') %>% 
+#   filter(!name %in% c("Alaska"))
+# 
+# saved_crs = st_crs(countries)
+# 
+# rot.deg <-   30
+# rot.x   <- -120
+# rot.y   <-   22
+# 
+# # Rotate countries
+# countries_rotated = countries %>%
+#   st_ellide_rotate(rot.deg, center_coords = c(rot.y, rot.x))
+# 
+# st_crs(countries_rotated) <- saved_crs
+# 
+# ggplot(data=countries_rotated) +
+#   geom_sf()
+# 
+# # Load bathymetry contours
+# contours_rotated <- bathy.contours %>%
+#   st_ellide_rotate(rot.deg, center_coords = c(rot.y, rot.x)) 
+# 
+# st_crs(contours_rotated)  <- saved_crs
+# 
+# # Transform locations
+# locations_rotated  <- locations %>% 
+#   st_as_sf(coords = c("long","lat"), crs = crs.geog) %>%
+#   st_ellide_rotate(rot.deg, center_coords = c(rot.y, rot.x))
+# 
+# st_crs(locations_rotated) <- saved_crs
+# 
+# # Works with 30deg centered on 22/-120
+# base.map.rot <- ggplot() +
+#   geom_sf(data=countries_rotated) +
+#   # geom_sf(data=contours_rotated) +
+#   coord_sf(crs = saved_crs, xlim = c(-30,-18), ylim=c(70, 107)) +
+#   # labs(subtitle = paste('rotated:', rot.deg, ' deg\n', 'centered on:', rot.y, ', ',rot.x)) +
+#   # theme_minimal() +
+#   theme(axis.title.x=element_blank(),
+#         axis.text.x=element_blank(),
+#         axis.ticks.x=element_blank(),
+#         axis.title.y=element_blank(),
+#         axis.text.y=element_blank(),
+#         axis.ticks.y=element_blank(),
+#         panel.grid.major = element_blank(),
+#         panel.grid.minor = element_blank())
+# 
+# ggsave(base.map.rot,
+#        file = here::here("Figs/basemap_rotated_30.png"),
+#        width = 2)
+```
+
+
+```{r map-catch}
+catch.map.grid <- base.map + 
+  geom_sf(data = haul.mid.sf, fill = "gray70", 
+          alpha = 0.5, shape = 21, size = 1) +
+  geom_point(data = haul.jcf, aes(long, lat), fill = "gray70", 
+             alpha = 0.5, shape = 21, size = 1) +
+  # Plot bathy contours
+  geom_sf(data = bathy.contours, colour = "gray20", alpha = 0.5, linewidth = 0.5) +
+  geom_point(data = filter(catch, totalWeight > 0.1), 
+             aes(long, lat, fill = scientificName),
+             shape = 21,
+             alpha = 1, show.legend = FALSE) +
+  geom_point(data = catch.jcf, aes(long, lat, fill = scientificName), 
+             shape = 21,
+             alpha = 1, show.legend = FALSE) +
+  facet_grid(season~scientificName) + 
+  # # Configure catch point colors
+  # scale_colour_manual(name = "Season", 
+  #                     labels = c("Spring", "Summer"),
+  #                     values = c("spring" = "blue", "summer" = "red"),
+  #                     guide = "none") +
+  # Configure catch point colors
+  scale_fill_manual(name = 'Species',
+                    labels = c("Clupea pallasii","Engraulis mordax","Etrumeus acuminatus",
+                               "Sardinops sagax", "Scomber japonicus","Trachurus symmetricus"),
+                    values = c(pac.herring.color, anchovy.color, rnd.herring.color,
+                               sardine.color, pac.mack.color, jack.mack.color)) +
+  # Plot landmarks
+  geom_point(data = locations, aes(long, lat), size = 1, 
+             shape = 21, fill = 'gray50', colour = "black") +
+  geom_shadowtext(data  = locations, aes(long, lat, label = name),
+                  colour = 'gray20', size = 2, fontface = 'bold',
+                  hjust = 0, nudge_x = 0.2, nudge_y = 0.05, 
+                  angle = 25,
+                  bg.colour = "white") +
+  coord_sf(crs = crs.geog, # CA Albers Equal Area Projection
+           xlim = unname(c(map.bounds["xmin"], map.bounds["xmax"])), 
+           ylim = unname(c(map.bounds["ymin"], map.bounds["ymax"]))) +
+  theme_bw() +
+  theme(strip.background.x = element_blank(),
+        strip.text.x = element_text(face = "bold.italic"),
+        strip.background.y = element_blank(),
+        strip.text.y = element_text(face = "bold")) 
+
+ggsave(catch.map.grid, file = here("figs/catch_map_grid.png"),
+       height = 7*1.1, width = 14*1.1)
+
+knitr::include_graphics(here("figs/catch_map_grid.png"))
+
+# ggplot() + 
+#   geom_point(data = haul.jcf, aes(long, lat, colour = scientificName)) + 
+#   geom_point(data = filter(haul.jcf, totalCatchWtkg > 0), aes(long, lat, colour = scientificName)) + 
+#   facet_wrap(~scientificName) +
+#   coord_map()
+```
+
+```{r map-spp-distributions}
+# Create basemap for species distributions
+base.map.export <- base.map + 
+  # Plot bathy contours
+  # geom_sf(data = bathy.contours, colour = "gray20", alpha = 0.5, linewidth = 0.5) +
+  # Plot landmarks
+  geom_point(data = locations, aes(long, lat), size = 1, 
+             shape = 21, fill = 'gray50', colour = "black") +
+  geom_shadowtext(data  = locations, aes(long, lat, label = name),
+                  colour = 'gray20', size = 2, fontface = 'bold',
+                  hjust = 0, nudge_x = 0.2, nudge_y = 0.05, 
+                  angle = 25,
+                  bg.colour = "white") +
+  coord_sf(crs = crs.geog, # CA Albers Equal Area Projection
+           xlim = unname(c(map.bounds["xmin"], map.bounds["xmax"])), 
+           ylim = unname(c(map.bounds["ymin"], map.bounds["ymax"]))) +
+  theme_bw() +
+  theme(strip.background.x = element_blank(),
+        strip.text.x = element_text(face = "bold.italic"),
+        strip.background.y = element_blank(),
+        strip.text.y = element_text(face = "bold")) 
+
+catch.map.dist1 <- base.map + 
+  geom_sf(data = haul.mid.sf, fill = "gray70", 
+          alpha = 0.5, shape = 21, size = 1) +
+  geom_point(data = haul.jcf, aes(long, lat), fill = "gray70", 
+             alpha = 0.5, shape = 21, size = 1) +
+  # Plot bathy contours
+  geom_sf(data = bathy.contours, colour = "gray20", alpha = 0.5, linewidth = 0.5) +
+  geom_point(data = filter(catch, totalWeight > 0.1), 
+             aes(long, lat, fill = season),
+             shape = 21,
+             alpha = 1, show.legend = FALSE) +
+  geom_point(data = catch.jcf, aes(long, lat, fill = season), 
+             shape = 21,
+             alpha = 1, show.legend = FALSE) +
+  facet_grid(season~scientificName) + 
+  # # Configure catch point colors
+  # scale_colour_manual(name = "Season", 
+  #                     labels = c("Spring", "Summer"),
+  #                     values = c("spring" = "blue", "summer" = "red"),
+  #                     guide = "none") +
+  # Configure catch point colors
+  scale_fill_manual(name = 'Season',
+                    labels = c("Spring","Summer"),
+                    values = c("blue","red")) +
+  # Plot landmarks
+  geom_point(data = locations, aes(long, lat), size = 1, 
+             shape = 21, fill = 'gray50', colour = "black") +
+  geom_shadowtext(data  = locations, aes(long, lat, label = name),
+                  colour = 'gray20', size = 2, fontface = 'bold',
+                  hjust = 0, nudge_x = 0.2, nudge_y = 0.05, 
+                  angle = 25,
+                  bg.colour = "white") +
+  coord_sf(crs = crs.geog, # CA Albers Equal Area Projection
+           xlim = unname(c(map.bounds["xmin"], map.bounds["xmax"])), 
+           ylim = unname(c(map.bounds["ymin"], map.bounds["ymax"]))) +
+  theme_bw() +
+  theme(strip.background.x = element_blank(),
+        strip.text.x = element_text(face = "bold.italic"),
+        strip.background.y = element_blank(),
+        strip.text.y = element_text(face = "bold")) 
+
+ggsave(catch.map.dist1, file = here("figs/catch_map_dist_grid.png"),
+       height = 7*1.1, width = 14*1.1)
+
+ggsave(base.map.export, file = here("figs/basemap.png"),
+       height = 6*1.1, width = 4*1.1)
+
+knitr::include_graphics(here("figs/catch_map_dist_grid.png"))
+
+# ggplot() + 
+#   geom_point(data = haul.jcf, aes(long, lat, colour = scientificName)) + 
+#   geom_point(data = filter(haul.jcf, totalCatchWtkg > 0), aes(long, lat, colour = scientificName)) + 
+#   facet_wrap(~scientificName) +
+#   coord_map()
+```
+
+```{r map-spp-distributions}
+catch.map.dist2 <- base.map + 
+  geom_sf(data = haul.mid.sf, fill = "gray70", 
+          alpha = 0.5, shape = 21, size = 1) +
+  geom_point(data = haul.jcf, aes(long, lat), fill = "gray70", 
+             alpha = 0.5, shape = 21, size = 1) +
+  # Plot bathy contours
+  geom_sf(data = bathy.contours, colour = "gray20", alpha = 0.5, linewidth = 0.5) +
+  geom_point(data = filter(catch, totalWeight > 0.1), 
+             aes(long, lat, fill = season),
+             shape = 21,
+             alpha = 1, show.legend = FALSE) +
+  geom_point(data = catch.jcf, aes(long, lat, fill = season), 
+             shape = 21,
+             alpha = 1, show.legend = FALSE) +
+  facet_wrap(~scientificName, nrow = 1) + 
+  # # Configure catch point colors
+  # scale_colour_manual(name = "Season", 
+  #                     labels = c("Spring", "Summer"),
+  #                     values = c("spring" = "blue", "summer" = "red"),
+  #                     guide = "none") +
+  # Configure catch point colors
+  scale_fill_manual(name = 'Season',
+                    labels = c("Spring","Summer"),
+                    values = c("blue","red")) +
+  # Plot landmarks
+  geom_point(data = locations, aes(long, lat), size = 1, 
+             shape = 21, fill = 'gray50', colour = "black") +
+  geom_shadowtext(data  = locations, aes(long, lat, label = name),
+                  colour = 'gray20', size = 2, fontface = 'bold',
+                  hjust = 0, nudge_x = 0.2, nudge_y = 0.05, 
+                  angle = 25,
+                  bg.colour = "white") +
+  coord_sf(crs = crs.geog, # CA Albers Equal Area Projection
+           xlim = unname(c(map.bounds["xmin"], map.bounds["xmax"])), 
+           ylim = unname(c(map.bounds["ymin"], map.bounds["ymax"]))) +
+  theme_bw() +
+  theme(strip.background.x = element_blank(),
+        strip.text.x = element_text(face = "bold.italic"),
+        strip.background.y = element_blank(),
+        strip.text.y = element_text(face = "bold")) 
+
+ggsave(catch.map.dist2, file = here("figs/catch_map_dist_facet.png"),
+       height = 5*1.1, width = 14*1.1)
+
+knitr::include_graphics(here("figs/catch_map_dist_facet.png"))
+
+# ggplot() + 
+#   geom_point(data = haul.jcf, aes(long, lat, colour = scientificName)) + 
+#   geom_point(data = filter(haul.jcf, totalCatchWtkg > 0), aes(long, lat, colour = scientificName)) + 
+#   facet_wrap(~scientificName) +
+#   coord_map()
+```
+
+```{r catch-histograms, eval=FALSE}
+# catch2 <- filter(catch, between(totalWeight, 0.01, 2500))
+# catch.jcf2 <- filter(catch.jcf, between(totalCatchWtkg, 0.1, 2500))
+# ggplot(catch2, aes(totalWeight)) + geom_histogram()
+# ggplot(catch.jcf, aes(totalCatchWtkg)) + geom_histogram()
+# 
+# catch <- catch %>% 
+#   filter(!is.na(totalWeight),!is.na(totalNum)) %>% 
+#   filter(!ship %in% c("MF"))
+# 
+# ggplot(catch, aes(long, lat)) + 
+#   geom_point(colour = "gray50") +
+#   geom_point(data = filter(catch, totalWeight > 0.1, ship != "MF"), colour = "blue") +
+#   facet_grid(season~scientificName) + 
+#   coord_map()
+```
+
+
+```{r map-catch-rotated, eval=FALSE}
+# rot.deg <-   30
+# rot.x   <- -120
+# rot.y   <-   22
+# 
+# # Rotate data layers
+# haul.rot <- haul.mid.sf %>% 
+#   st_ellide_rotate(rot.deg, center_coords = c(rot.y, rot.x))
+# 
+# catch.rot <- catch %>%
+#   st_as_sf(coords = c("long","lat"), crs = crs.geog) %>% 
+#   st_ellide_rotate(rot.deg, center_coords = c(rot.y, rot.x))
+# 
+# base.map.rotated + 
+#   geom_sf(data = haul.rot, colour = "gray70", alpha = 0.2) +
+#   geom_sf(data = catch.rot, aes(colour = scientificName), 
+#              alpha = 0.5, show.legend = FALSE) +
+#   facet_grid(season~scientificName) +
+#   scale_colour_manual(name = 'Species',
+#                       labels = c("Clupea pallasii","Engraulis mordax","Sardinops sagax",
+#                                  "Scomber japonicus","Trachurus symmetricus"),
+#                       values = c(pac.herring.color, anchovy.color, sardine.color, 
+#                                  pac.mack.color, jack.mack.color)) +
+#   coord_sf(xlim = c(-30,-18), ylim=c(70, 107)) 
+# 
+# catch.map <- base.map + 
+#   geom_sf(data = haul.mid.sf, colour = "gray70", alpha = 0.2) +
+#   geom_point(data = catch, aes(long, lat, colour = scientificName), 
+#              alpha = 0.5, show.legend = FALSE) +
+#   facet_grid(season~scientificName) + 
+#   # # Configure catch point colors
+#   # scale_colour_manual(name = "Season", 
+#   #                     labels = c("Spring", "Summer"),
+#   #                     values = c("spring" = "blue", "summer" = "red"),
+#   #                     guide = "none") +
+#   # Configure catch point colors
+#   scale_colour_manual(name = 'Species',
+#                       labels = c("Clupea pallasii","Engraulis mordax","Sardinops sagax",
+#                                  "Scomber japonicus","Trachurus symmetricus"),
+#                       values = c(pac.herring.color, anchovy.color, sardine.color, 
+#                                  pac.mack.color, jack.mack.color)) +
+#   # Plot landmarks
+#   geom_point(data = locations, aes(long, lat), size = 1, 
+#              shape = 21, fill = 'gray50', colour = "black") +
+#   geom_shadowtext(data  = locations, aes(long, lat, label = name),
+#                   colour = 'gray20', size = 2, fontface = 'bold',
+#                   hjust = 0, nudge_x = 0.2, nudge_y = 0.05, 
+#                   angle = 25,
+#                   bg.colour = "white") +
+#   coord_sf(crs = crs.geog, # CA Albers Equal Area Projection
+#            xlim = unname(c(map.bounds["xmin"], map.bounds["xmax"])), 
+#            ylim = unname(c(map.bounds["ymin"], map.bounds["ymax"]))) +
+#   theme_bw() +
+#   theme(strip.background.x = element_blank(),
+#         strip.text.x = element_text(face = "bold.italic"),
+#         strip.background.y = element_blank(),
+#         strip.text.y = element_text(face = "bold")) 
+# 
+# ggsave(catch.map, file = here("figs/catch_map_facet.png"),
+#        height = 7*1.1, width = 12*1.1)
+# 
+# knitr::include_graphics(here("figs/catch_map_facet.png"))
+```
+
+```{r map-plan}
+# Core area transects
+plan.map.core <- base.map + 
+  geom_sf(data = filter(tx.all, Type != "Nearshore"), aes(colour = Type)) + 
+  scale_colour_manual(name = "Type", 
+                      labels = c("Adaptive", "Compulsory"),
+                      values = c("Adaptive" = "red", "Compulsory" = "blue"),
+                      guide = "none") +
+  # Plot landmarks
+  geom_point(data = locations, aes(long, lat), size = 1, 
+             shape = 21, fill = 'gray50', colour = "black") +
+  geom_shadowtext(data  = locations, aes(long, lat, label = name),
+                  colour = 'gray20', size = 2.5, fontface = 'bold',
+                  hjust = 0, nudge_x = 0.2, nudge_y = 0.05, 
+                  angle = 25,
+                  bg.colour = "white") +
+  coord_sf(crs = crs.geog, # CA Albers Equal Area Projection
+           xlim = unname(c(map.bounds["xmin"], map.bounds["xmax"])), 
+           ylim = unname(c(map.bounds["ymin"], map.bounds["ymax"]))) +
+  theme_bw() +
+  theme(strip.background.x = element_blank(),
+        strip.text.x = element_text(face = "bold.italic"),
+        strip.background.y = element_blank(),
+        strip.text.y = element_text(face = "bold")) 
+
+# Nearshore transects
+plan.map.ns <- base.map + 
+  geom_sf(data = filter(tx.all, Type == "Nearshore"), aes(colour = Type)) + 
+  scale_colour_manual(name = "Type", 
+                      labels = c("Nearshore"),
+                      values = c("Nearshore" = "green"),
+                      guide = "none") +
+  # Plot landmarks
+  geom_point(data = locations, aes(long, lat), size = 1, 
+             shape = 21, fill = 'gray50', colour = "black") +
+  geom_shadowtext(data  = locations, aes(long, lat, label = name),
+                  colour = 'gray20', size = 2.5, fontface = 'bold',
+                  hjust = 0, nudge_x = 0.2, nudge_y = 0.05, 
+                  angle = 25,
+                  bg.colour = "white") +
+  coord_sf(crs = crs.geog, # CA Albers Equal Area Projection
+           xlim = unname(c(map.bounds["xmin"], map.bounds["xmax"])), 
+           ylim = unname(c(map.bounds["ymin"], map.bounds["ymax"]))) +
+  theme_bw() +
+  theme(strip.background.x = element_blank(),
+        strip.text.x = element_text(face = "bold.italic"),
+        strip.background.y = element_blank(),
+        strip.text.y = element_text(face = "bold")) + 
+  labs(x = "Longitude",
+       y = "Latitude")
+
+# Combine maps
+plan.map.both <- plan.map.core + plan.map.ns + 
+  plot_annotation(tag_levels = 'a',
+                  tag_suffix = ')')
+
+# Save maps
+ggsave(plan.map.core, file = here("figs/plan_map_core.png"),
+       height = 7, width = 5)
+
+ggsave(plan.map.ns, file = here("figs/plan_map_nearshore.png"),
+       height = 7, width = 5)
+
+ggsave(plan.map.both, file = here("figs/plan_map_combined.png"),
+       height = 7*1.2, width = 10*1.2)
+
+knitr::include_graphics(here("figs/plan_map_combined.png"))
+```
+
+```{r catch-proportion-maps-us}
+# 2021
+load("C:/KLS/CODE/Github/estimATM/2107RL/Output/catch_info.Rdata")
+# load("C:/KLS/CODE/Github/estimATM/2107RL/Output/catch_final.Rdata")
+haul.pie.all   <- haul.pie %>% mutate(survey = "Summer 2021") 
+cluster.pie.all <- cluster.pie %>% mutate(survey = "Summer 2021") 
+# catch.all <- catch %>% mutate(survey = "Summer 2021") %>% 
+#   left_join(select(haul.pie, haul, long, lat)) 
+
+# 2022
+load("C:/KLS/CODE/Github/estimATM/2207RL/Output/trawl_pie_plotBio.Rdata")
+haul.pie.all    <- haul.pie %>% mutate(survey = "Summer 2022") %>% 
+  bind_rows(haul.pie.all)
+cluster.pie.all <- cluster.pie %>% mutate(survey = "Summer 2022") %>% 
+  bind_rows(cluster.pie.all)
+
+# 2023
+load("C:/KLS/CODE/Github/estimATM/2307RL/Output/trawl_pie_plotBio.Rdata")
+haul.pie.all    <- haul.pie %>% mutate(survey = "Summer 2023") %>% 
+  bind_rows(haul.pie.all)
+cluster.pie.all <- cluster.pie %>% mutate(survey = "Summer 2023") %>% 
+  bind_rows(cluster.pie.all)
+
+# ggplot(haul.pie.all, aes(long, lat)) + 
+#   geom_point() + 
+#   facet_wrap(~survey)
+
+hauls.sf <- haul.pie.all %>%
+  st_as_sf(coords = c("long","lat"), crs = 4326)
+
+map.bounds.proj <- tx.points %>% 
+  # bind_rows(haul.mid.sf) %>% 
+  select(geometry) %>% 
+  st_transform(crs = 3310) %>%
+  st_bbox()
+
+# Calculate pie radius based on latitude range; 0.0125 too small when nrow = 2
+pie.radius <- as.numeric(abs(map.bounds.proj$ymin - map.bounds.proj$ymax)*0.015) 
+
+# Filter for positive hauls and clusters
+haul.pos <- filter(haul.pie.all, AllCPS > 0) %>% 
+  arrange(X) %>% 
+  mutate(group = paste(survey, haul), 
+         r = pie.radius) 
+
+# Substitute very small value for species with zero catch, just for pie charts
+if (nrow(haul.pos) > 0) {
+  haul.pos <- haul.pos %>% 
+    replace(. == 0, 0.0000001) 
+}
+
+# Filter for empty trawls
+haul.zero    <- filter(haul.pie.all, AllCPS == 0)
+
+# Create trawl haul figure
+trawl.pie.haul.wt <- base.map.proj +
+  # # Plot transects data
+  # geom_sf(data = transects.sf, size = 0.5, colour = "gray70", 
+  #         alpha = 0.75, linetype = "dashed") +
+  # # plot ship track data
+  # geom_sf(data = nav.paths.sf, colour = "gray50", size = 0.5, alpha = 0.5) +
+  # Plot trawl pies
+  geom_scatterpie(data = haul.pos, aes(X, Y, group = haul, r = r),
+                  cols = c("Anchovy", "JackMack", "Jacksmelt", 
+                           "PacHerring", "PacMack", "RndHerring", "Sardine"),
+                  alpha = 0.8, sorted_by_radius = TRUE) +
+  # # Configure pie outline colors
+  # scale_colour_manual(name = "Sample type", 
+  #                     labels = c("Purse seine", "Trawl"),
+  #                     values = c("Seine" = seine.color, "Trawl" = trawl.color),
+  #                     guide = "none") +
+  # Configure trawl scale
+  scale_fill_manual(name = 'Species',
+                    labels = c("Anchovy", "J. Mackerel", "Jacksmelt", 
+                               "P. herring", "P. mackerel", "R. herring", "Sardine"),
+                    values = c(anchovy.color, jack.mack.color, jacksmelt.color, 
+                               pac.herring.color, pac.mack.color, rnd.herring.color, 
+                               sardine.color)) +
+  # Plot empty cluster locations
+  geom_point(data = haul.zero, aes(X, Y),
+             size = 3, shape = 21, fill = 'black', colour = 'white') +
+  facet_wrap(~survey) +
+  # geom_scatterpie_legend(radius = trawl.breaks, x = -50000, y = -600000) +
+  # Plot landmarks
+  geom_point(data = locations, aes(X, Y), size = 1, 
+             shape = 21, fill = 'gray50', colour = "black") +
+  geom_shadowtext(data  = locations, aes(X, Y, label = name),
+                  colour = 'gray20', size = 2, fontface = 'bold',
+                  hjust = 0, nudge_x = 0.2, nudge_y = 0.05, 
+                  angle = 25,
+                  bg.colour = "white") +
+  coord_sf(crs = crs.proj, 
+           xlim = unname(c(map.bounds.proj["xmin"], map.bounds.proj["xmax"])), 
+           ylim = unname(c(map.bounds.proj["ymin"], map.bounds.proj["ymax"])))
+
+ggsave(trawl.pie.haul.wt, file = here::here("figs/trawl_proportions_us.png"),
+       width = 15, height = 10)
+```
+
+
+```{r catch-proportion-maps-mx}
+# Summarize trawl catch by species
+haul.summ.wt <- catch.jcf %>% 
+  mutate(key = paste(cruise, haul)) %>% 
+  select(key, scientificName, totalCatchWtkg) %>% 
+  tidyr::spread(scientificName, totalCatchWtkg) 
+
+# Add species with zero total weight
+if (!has_name(haul.summ.wt, "Engraulis mordax"))      {haul.summ.wt$`Engraulis mordax`      <- 0}
+if (!has_name(haul.summ.wt, "Sardinops sagax"))       {haul.summ.wt$`Sardinops sagax`       <- 0}
+if (!has_name(haul.summ.wt, "Scomber japonicus"))     {haul.summ.wt$`Scomber japonicus`     <- 0}
+if (!has_name(haul.summ.wt, "Trachurus symmetricus")) {haul.summ.wt$`Trachurus symmetricus` <- 0}
+if (!has_name(haul.summ.wt, "Clupea pallasii"))       {haul.summ.wt$`Clupea pallasii`       <- 0}
+if (!has_name(haul.summ.wt, "Atherinopsis californiensis")) {haul.summ.wt$`Atherinopsis californiensis` <- 0}
+if (!has_name(haul.summ.wt, "Etrumeus acuminatus"))   {haul.summ.wt$`Etrumeus acuminatus` <- 0}
+if (!has_name(haul.summ.wt, "Other"))                 {haul.summ.wt$`Other` <- 0}
+
+# Calculate total weight of all CPS species
+haul.summ.wt <- haul.summ.wt %>%  
+  replace(is.na(.), 0) %>% 
+  mutate(AllCPS = rowSums(select(., -key))) %>%
+  # mutate(AllCPS = rowSums(.[, 3:ncol(.)])) %>%
+  rename("Jacksmelt"  = "Atherinopsis californiensis",
+         "PacHerring" = "Clupea pallasii",
+         "Anchovy"    = "Engraulis mordax",
+         "Sardine"    = "Sardinops sagax",
+         "PacMack"    = "Scomber japonicus",
+         "JackMack"   = "Trachurus symmetricus",
+         "RndHerring" = "Etrumeus acuminatus",
+         "Other"      = "Other") 
+
+# # Summarise catch by cluster
+# cluster.summ.wt <- haul.summ.wt %>% 
+#   select(-haul, -AllCPS) %>% 
+#   group_by(cluster) %>% 
+#   summarise_all(list(sum)) %>% 
+#   mutate(AllCPS = rowSums(select(., -cluster))) %>% 
+#   right_join(cluster.mid) %>% 
+#   replace(is.na(.), 0)
+
+haul.info.jcf <- haul.jcf %>% 
+  # mutate(group = paste(cruise, haul)) %>% 
+  select(key, cruise, survey, date, lat, long, season) %>% 
+  distinct()
+
+# Add lat/long to haul summary for plotting
+haul.summ.wt <- haul.summ.wt %>% 
+  left_join(haul.info.jcf) %>% 
+  replace(is.na(.), 0) %>% 
+  filter(season == "Summer")
+
+# Select and rename trawl data for pie charts
+haul.pie.jcf <- haul.summ.wt %>% 
+  select(cruise, survey, season, date, key, long, lat, Anchovy, JackMack, 
+         Jacksmelt, Other, PacHerring, PacMack, 
+         RndHerring, Sardine, AllCPS) %>%
+  mutate(year = year(date),
+         survey = paste(season, year)) %>% 
+  project_df(to = crs.proj)
+
+# ggplot(haul.pie.all, aes(long, lat)) + 
+#   geom_point() + 
+# #   facet_wrap(~survey)
+# 
+# hauls.sf <- haul.pie.all %>%
+#   st_as_sf(coords = c("long","lat"), crs = 4326)
+# 
+# map.bounds <- hauls.sf %>% 
+#   st_transform(crs = 3310) %>%
+#   st_bbox()
+
+# Calculate pie radius based on latitude range; 0.0125 too small when nrow = 2
+# pie.radius <- as.numeric(abs(map.bounds$ymin - map.bounds$ymax)*0.015) 
+
+# Filter for positive hauls and clusters
+haul.pos.jcf <- filter(haul.pie.jcf, AllCPS > 0) %>% 
+  arrange(X) %>% 
+  mutate(group = key, 
+         r = pie.radius) 
+
+
+# Substitute very small value for species with zero catch, just for pie charts
+if (nrow(haul.pos.jcf) > 0) {
+  haul.pos.jcf <- haul.pos.jcf %>% 
+    replace(. == 0, 0.0000001) 
+}
+
+# Filter for empty trawls
+# haul.zero.jcf    <- filter(haul.pie.jcf, AllCPS == 0)
+
+haul.zero.jcf <- read_csv(here::here("data/positio_negativo_pelmen_lon_lat.csv")) %>% 
+  filter(peso_captura_total_kg == 0) %>% 
+  project_df(to = crs.proj) %>% 
+  mutate(date = dmy(date)) %>% 
+  mutate(season = case_when(
+    month(date) < 6 ~ "Spring",
+    TRUE ~ "Summer")) %>% 
+  mutate(survey = paste(season, year(date))) %>% 
+  filter(survey %in% c("Summer 2021","Summer 2022","Summer 2023"))
+
+# haul.zero.jcf <- haul.jcf %>% 
+#   filter(!key %in% haul.pos.jcf$key) %>% 
+#   filter(season == "Summer")
+
+# Create trawl haul figure
+trawl.pie.haul.wt.jcf <- base.map.proj +
+  # # Plot transects data
+  # geom_sf(data = transects.sf, size = 0.5, colour = "gray70", 
+  #         alpha = 0.75, linetype = "dashed") +
+  # # plot ship track data
+  # geom_sf(data = nav.paths.sf, colour = "gray50", size = 0.5, alpha = 0.5) +
+  # Plot trawl pies
+  geom_scatterpie(data = haul.pos.jcf, aes(X, Y, group = key, r = r),
+                  cols = c("Anchovy", "JackMack", "Jacksmelt", 
+                           "PacHerring", "PacMack", "RndHerring", "Sardine"),
+                  alpha = 0.8, sorted_by_radius = TRUE) +
+  # # Configure pie outline colors
+  # scale_colour_manual(name = "Sample type", 
+  #                     labels = c("Purse seine", "Trawl"),
+  #                     values = c("Seine" = seine.color, "Trawl" = trawl.color),
+  #                     guide = "none") +
+  # Configure trawl scale
+  scale_fill_manual(name = 'Species',
+                    labels = c("Anchovy", "J. Mackerel", "Jacksmelt", 
+                               "P. herring", "P. mackerel", "R. herring", "Sardine"),
+                    values = c(anchovy.color, jack.mack.color, jacksmelt.color, 
+                               pac.herring.color, pac.mack.color, rnd.herring.color, 
+                               sardine.color)) +
+  # Plot empty cluster locations
+  geom_point(data = haul.zero.jcf, aes(X, Y),
+             size = 3, shape = 21, fill = 'black', colour = 'white') +
+  facet_wrap(~survey) +
+  # geom_scatterpie_legend(radius = trawl.breaks, x = -50000, y = -600000) + 
+  # Plot landmarks
+  geom_point(data = locations, aes(X, Y), size = 1, 
+             shape = 21, fill = 'gray50', colour = "black") +
+  geom_shadowtext(data  = locations, aes(X, Y, label = name),
+                  colour = 'gray20', size = 2, fontface = 'bold',
+                  hjust = 0, nudge_x = 0.2, nudge_y = 0.05, 
+                  angle = 25,
+                  bg.colour = "white") +
+  coord_sf(crs = crs.proj, 
+           xlim = unname(c(map.bounds.proj["xmin"], map.bounds.proj["xmax"])), 
+           ylim = unname(c(map.bounds.proj["ymin"], map.bounds.proj["ymax"])))
+
+ggsave(trawl.pie.haul.wt.jcf, file = here::here("figs/trawl_proportions_mx.png"),
+       width = 15, height = 10)
+```
+
+```{r catch-proportions-map-combo}
+haul.pos.combo <- haul.pos %>% 
+  bind_rows(haul.pos.jcf) %>% 
+  filter(!survey %in% c("Summer 2019","Summer 2020"))
+
+haul.zero.combo <- haul.zero %>% 
+  bind_rows(haul.zero.jcf) %>% 
+  filter(!survey %in% c("Summer 2019","Summer 2020"))
+
+# Create trawl haul figure
+trawl.pie.haul.wt.combo <- base.map.proj +
+  # Plot trawl pies
+  geom_scatterpie(data = haul.pos.combo, aes(X, Y, group = group, r = r),
+                  cols = c("Anchovy", "JackMack", "Jacksmelt", 
+                           "PacHerring", "PacMack", "RndHerring", "Sardine"),
+                  alpha = 0.8, sorted_by_radius = TRUE) +
+  # # Configure pie outline colors
+  # scale_colour_manual(name = "Sample type", 
+  #                     labels = c("Purse seine", "Trawl"),
+  #                     values = c("Seine" = seine.color, "Trawl" = trawl.color),
+  #                     guide = "none") +
+  # Configure trawl scale
+  scale_fill_manual(name = 'Species',
+                    labels = c("Anchovy", "J. Mackerel", "Jacksmelt", 
+                               "P. herring", "P. mackerel", "R. herring", "Sardine"),
+                    values = c(anchovy.color, jack.mack.color, jacksmelt.color, 
+                               pac.herring.color, pac.mack.color, rnd.herring.color, 
+                               sardine.color)) +
+  # Plot empty cluster locations
+  geom_point(data = haul.zero.combo, aes(X, Y),
+             size = 3, shape = 21, fill = 'black', colour = 'white') +
+  facet_wrap(~survey, nrow = 1) +
+  # geom_scatterpie_legend(radius = trawl.breaks, x = -50000, y = -600000) + 
+  # Plot landmarks
+  geom_point(data = locations, aes(X, Y), size = 1, 
+             shape = 21, fill = 'gray50', colour = "black") +
+  geom_shadowtext(data  = locations, aes(X, Y, label = name),
+                  colour = 'gray20', size = 2, fontface = 'bold',
+                  hjust = 0, nudge_x = 0.2, nudge_y = 0.05, 
+                  angle = 25,
+                  bg.colour = "white") +
+  coord_sf(crs = crs.proj, 
+           xlim = unname(c(map.bounds.proj["xmin"], map.bounds.proj["xmax"])), 
+           ylim = unname(c(map.bounds.proj["ymin"], map.bounds.proj["ymax"]))) +
+    theme(strip.background.x = element_blank(),
+        strip.text.x = element_text(face = "bold")) + 
+  labs(x = "Longitude",
+       y = "Latitude")
+
+ggsave(trawl.pie.haul.wt.combo, file = here::here("figs/trawl_proportions_combo.png"),
+       width = 15, height = 8)
+
+```
+
+```{r plot-time-series}
+source(here::here("code/plot_biomass_ts.R"))
+```
+
+```{r species-distribution-polygons, eval = FALSE}
+catch.sf <- catch %>% 
+  mutate(region = "US") %>% 
+  select(cruise, haul, region, long, lat, scientificName, totalWeight, season) %>%
+  bind_rows(select(catch.jcf, cruise, haul, region, long, lat, scientificName, totalWeight = totalCatchWtkg, season)) %>% 
+  st_as_sf(coords = c("long","lat"), crs = crs.geog)
+
+mapview::mapview(catch.sf, zcol = "region")
+
+ggplot() +
+  geom_sf(data = catch.sf, aes(colour = region)) +
+  facet_grid(season~scientificName)
+
+spp.polygons <- catch.sf %>% 
+  filter(region != "GOC") %>% 
+  filter(scientificName == "Sardinops sagax", season == "Spring") %>% 
+  concaveman(concavity = 10)
+# group_by(scientificName, season) %>% 
+# st_convex_hull()
+mapview::mapview(spp.polygons)
+
+spp.buffers <- catch.sf %>% 
+  filter(region != "GOC") %>% 
+  group_by(scientificName, season) %>% 
+  # st_union() %>% 
+  # filter(scientificName == "Sardinops sagax", season == "Spring") %>% 
+  st_buffer(10/60)
+
+base.map +
+  stat_density2d(data = filter(catch.sf, scientificName == "Sardinops sagax", region != "GOC"), 
+                 aes(x = long, y = lat, fill = after_stat(density)), geom = 'tile', contour = F, alpha = .5) + 
+  facet_grid(season~scientificName) + 
+  scale_fill_viridis_b() +
+  coord_sf(crs = crs.geog, # CA Albers Equal Area Projection
+           xlim = unname(c(map.bounds["xmin"], map.bounds["xmax"])), 
+           ylim = unname(c(map.bounds["ymin"], map.bounds["ymax"]))) 
+
+base.map +
+  stat_density2d(data = filter(catch.sf, scientificName == "Engraulis mordax", season == "Summer"), 
+                 aes(x = long, y = lat, fill = after_stat(density)), geom = 'tile', contour = F, alpha = .5) + 
+  facet_grid(season~scientificName) + 
+  scale_fill_viridis_b() +
+  coord_sf(crs = crs.geog, # CA Albers Equal Area Projection
+           xlim = unname(c(map.bounds["xmin"], map.bounds["xmax"])), 
+           ylim = unname(c(map.bounds["ymin"], map.bounds["ymax"]))) 
+
+```
+
+

@@ -622,6 +622,84 @@ knitr::include_graphics(here("figs/catch_map_dist_facet.png"))
 #   coord_map()
 ```
 
+```{r map-spp-distributions-juan}
+# Read and format lines
+sar.hab.summer <- readRDS(here("data/distribution_data/habitat.2018.summer.offshore.rds")) %>%
+  data.frame() %>% 
+  st_as_sf(coords = c("x","y"), crs = 4326) %>% 
+  summarise(do_union = F) %>% 
+  st_cast("LINESTRING")
+
+sar.hab.spring.upper <- readRDS(here("data/distribution_data/habitat.2006.spring.high.rds")) %>%
+  data.frame() %>% 
+  st_as_sf(coords = c("x","y"), crs = 4326) %>% 
+  summarise(do_union = F) %>% 
+  st_cast("LINESTRING")
+
+sar.hab.spring.lower <- readRDS(here("data/distribution_data/habitat.2006.spring.low.rds")) %>%
+  data.frame() %>% 
+  st_as_sf(coords = c("x","y"), crs = 4326) %>% 
+  summarise(do_union = F) %>% 
+  st_cast("LINESTRING")
+
+# Export to shapefiles
+
+
+# mapview::mapview(sar.hab.summer) + mapview::mapview(sar.hab.spring.lower) +
+#   mapview::mapview(sar.hab.spring.upper)
+
+# Create spring distribution map
+sar.hab.map.spring <- base.map + 
+  geom_sf(data = sar.hab.spring.lower, 
+          linetype = "dashed", linewidth = 1.5) +
+  geom_sf(data = sar.hab.spring.upper, 
+          linetype = "dashed", linewidth = 1.5) +
+  # Plot landmarks
+  geom_point(data = locations, aes(long, lat), size = 1, 
+             shape = 21, fill = 'gray50', colour = "black") +
+  geom_shadowtext(data  = locations, aes(long, lat, label = name),
+                  colour = 'gray20', size = 2, fontface = 'bold',
+                  hjust = 0, nudge_x = 0.2, nudge_y = 0.05, 
+                  angle = 25,
+                  bg.colour = "white") +
+  ggtitle("Spring") +
+  coord_sf(crs = crs.geog, # CA Albers Equal Area Projection
+           xlim = unname(c(map.bounds["xmin"], map.bounds["xmax"])), 
+           ylim = unname(c(map.bounds["ymin"], map.bounds["ymax"]))) +
+  theme_bw()
+
+ggsave(sar.hab.map.spring, file = here("figs/sardine_dist_map_spring.png"),
+       height = 7, width = 5)
+
+sar.hab.map.summer <- base.map + 
+  geom_sf(data = sar.hab.summer, 
+          linetype = "dashed", linewidth = 1.5) +
+  # Plot landmarks
+  geom_point(data = locations, aes(long, lat), size = 1, 
+             shape = 21, fill = 'gray50', colour = "black") +
+  geom_shadowtext(data  = locations, aes(long, lat, label = name),
+                  colour = 'gray20', size = 2, fontface = 'bold',
+                  hjust = 0, nudge_x = 0.2, nudge_y = 0.05, 
+                  angle = 25,
+                  bg.colour = "white") +
+  ggtitle("Summer") +
+  coord_sf(crs = crs.geog, # CA Albers Equal Area Projection
+           xlim = unname(c(map.bounds["xmin"], map.bounds["xmax"])), 
+           ylim = unname(c(map.bounds["ymin"], map.bounds["ymax"]))) +
+  theme_bw()
+
+ggsave(sar.hab.map.summer, file = here("figs/sardine_dist_map_summer.png"),
+       height = 7, width = 5)
+
+library(patchwork)
+
+sar.hab.map.all <- sar.hab.map.spring + sar.hab.map.summer
+
+ggsave(sar.hab.map.all, file = here("figs/sardine_dist_map.png"),
+       height = 7, width = 10)
+```
+
+
 ```{r catch-histograms, eval=FALSE}
 # catch2 <- filter(catch, between(totalWeight, 0.01, 2500))
 # catch.jcf2 <- filter(catch.jcf, between(totalCatchWtkg, 0.1, 2500))
@@ -1066,7 +1144,7 @@ trawl.pie.haul.wt.combo <- base.map.proj +
   coord_sf(crs = crs.proj, 
            xlim = unname(c(map.bounds.proj["xmin"], map.bounds.proj["xmax"])), 
            ylim = unname(c(map.bounds.proj["ymin"], map.bounds.proj["ymax"]))) +
-    theme(strip.background.x = element_blank(),
+  theme(strip.background.x = element_blank(),
         strip.text.x = element_text(face = "bold")) + 
   labs(x = "Longitude",
        y = "Latitude")
